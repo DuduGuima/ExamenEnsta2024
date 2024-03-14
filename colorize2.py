@@ -258,6 +258,7 @@ def minimize( A : sparse.csr_matrix, b : np.array, x0 : np.array, niters : int, 
     """
     Minimise la fonction quadratique a l'aide d'un gradient conjugue
     """
+    r_gather=[]
     A_height = np.shape(A)[0]
     index_min_A = floor(rank_i*A_height/size_i)
     index_max_A = floor((rank_i+1)*A_height/size_i)
@@ -266,13 +267,13 @@ def minimize( A : sparse.csr_matrix, b : np.array, x0 : np.array, niters : int, 
     index_min_b = floor(rank_i*b_height/size_i)
     index_max_b = floor((rank_i+1)*b_height/size_i)
     #we have a lot of products
-    r = b-A[index_min_A:index_max_A].dot(x0[index_min_b:index_max_b])
-    nrm_r0 = linalg.norm(r)
+    r = b[index_min_b:index_max_b]-A[index_min_A:index_max_A].dot(x0[index_min_b:index_max_b])
+    nrm_r0 = comm.allreduce(linalg.norm(r)**2,op = MPI.SUM)
     gc = A[index_min_A:index_max_A].transpose().dot(r)
     x = np.copy(x0[index_min_b:index_max_b])
     p = np.copy(gc)
     cp = A[index_min_A:index_max_A].dot(p)
-    nrm_gc = linalg.norm(gc)
+    nrm_gc = comm.allreduce(linalg.norm(gc))
     nrm_cp = linalg.norm(cp)
     alpha = nrm_gc*nrm_gc/(nrm_cp*nrm_cp)
     x += alpha*p
