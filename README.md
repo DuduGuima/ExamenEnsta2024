@@ -138,11 +138,53 @@ Vous remarquerez sûrement des petites différences entre le résultat trouvé p
 
 - Dans un premier temps, faites une partition de l'image en *nbp* tranches d'images et demandez à chaque processus d'essayer de coloriser sa portion d'image à partir des conditions de Dirichlet correspondant à sa portion d'image et en construisant une matrice uniquement locale à cette portion d'image. <font color=" #0000F0">Vous nommerez le fichier parallélisé <b>colorize1.py</b></font>
 - Bien que le résultat obtenu soit convenable, pourquoi la stratégie ci-dessus peut mener à des portions d'images qui soient non colorées ?
+
+
+R:
+Porquoi ce methode n'est pas le meilleur?
+bon, la minimization utilise les operations et expressions qui ne sont pas lineaires.
+Ainsi, j imagine que les resultats ne sont pas exatement la somme des resultats obtenus pour chaque processeur... la separation des produits matriciels individuelles est mieux
+        
+Aussi, quando on partage les arrays, comme on utilise les celules phantomes, quelques processeurs vont recevoir et utiliser, pendant les calculs de minimization et mise a jour de Cb e Cr, des valeurs qui ne seront pas mis a jour. Ainsi, pour quelques pixels de l'image originale, ils n'auront pas une evolution, ce qui peut nous donner
+une image gris comme l'initiale.
+
+
 - Dans un deuxième temps, construire une partie de la matrice globale (correspondant à l'image complète) et paralléliser les produits
   matrice-vecteur ainsi que le gradient conjugué afin de résoudre un problème global en parallèle plutôt que
   plusieurs problèmes locaux. <font color=" #0000F0">Vous nommerez le fichier parallélisé <b>colorize2.py</b></font>
 
 On calculera ensuite l'accélération obtenue pour les diverses parties parallélisées du code.
+Pour la premier question
+
+![Alt text](ResultsQ1/means_parallel.jpg)
+
+![Alt text](ResultsQ1/variance_parallel.jpg)
+
+![Alt text](ResultsQ1/mat_2nd_cfixe_parallel.jpg)
+
+![Alt text](ResultsQ1/dirichlet_parallel.jpg)
+
+![Alt text](ResultsQ1/cbmin_parallel.jpg)
+
+
+![Alt text](ResultsQ1/cbmax_parallel.jpg)
+
+les resultats pour le sequentiel sont:
+
+![Alt text](1part_seq.jpg)
+
+![Alt text](min_seq.jpg)
+
+Pour le calculs de minimization de presque 40/15 ~ 2.66 fois.
+
+Pour le Q3:
+![Alt text](ResultsQ2/2nd_parallel.jpg)
+
+![Alt text](ResultsQ2/cfixe_parallel.jpg)
+
+Alors, sauf les produits matriciels, tout est plus lent.
+
+
 
 À la fin de l'examen, vous enverrez vos trois fichiers (*README_nom_prenom.md*, *colorize1.py*, *colorize2.py*) **non archivés à votre chargé de TD** aux adresses e-mail suivant :
 

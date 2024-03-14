@@ -213,20 +213,34 @@ def compute_matrix(image_size, i_start, intensity, means, variance):
     # On retourne la matrice sous forme d'une matrice creuse stockee en csr avec scipy
     return sparse.csr_matrix((coefs, ind_cols, beg_rows), dtype=np.double)
 
-def search_fixed_colored_pixels(mark_values):
+def search_fixed_colored_pixels(mark_values,index_min,index_max):
     """
     Recherche dans l'image marquee l'indice des pixels dont on a fixé la couleur:
     On utilise pour cela l'espace colorimetrique HSV qui separe bien l'intensite
     de la saturation et de la teinte pour chaque pixel :
     """
-    hue        = np.array(mark_values[:,:,HUE].flat, dtype=np.double)
-    saturation = np.array(mark_values[:,:,SATURATION].flat, dtype=np.double)
+    #to gather results
+    result_hue=[]
+    result_sat=[]
+    hue        = np.array(mark_values[index_min:index_max,:,HUE].flat, dtype=np.double)
+    saturation = np.array(mark_values[index_min:index_max,:,SATURATION].flat, dtype=np.double)
+
+    result_hue=comm.allgather(hue)
+    result_sat=comm.allgather(saturation)
+    #verify shapes to stack afterwards
+    #print('processeur {} has sat size'.format(rank_i),np.shape(hue))
+    
+    hue=np.hstack(result_hue)
+    saturation=np.hstack(result_sat)
+
     return np.nonzero((hue != 0.) * (saturation != 0.))[0]
 
 def apply_dirichlet(A : sparse.csr_matrix, dirichlet : np.array):
     """
     Applique une condition de dirichlet aux endroits ou la couleur est deja definie a l'initiation
     """
+    #had understand the question wrong, we wont parallelize this...
+    #result_A = []
     for irow in range(A.shape[0]):
         if irow in dirichlet:
             A.data[A.indptr[irow]:A.indptr[irow+1]] = [0. if A.indices[i]!=irow else 1. for i in range(A.indptr[irow],A.indptr[irow+1])]
@@ -234,18 +248,30 @@ def apply_dirichlet(A : sparse.csr_matrix, dirichlet : np.array):
             for jcol in range(A.indptr[irow],A.indptr[irow+1]):
                 if A.indices[jcol] in dirichlet:
                     A.data[jcol] = 0.
-
+    #now each processor has an A with a part differente from the others
+    #we gather everything
+    # result_A.append(A[index_min:index_max])
+    # result_A = comm.allgather(result_A)
+    
 
 def minimize( A : sparse.csr_matrix, b : np.array, x0 : np.array, niters : int, epsilon : float):
     """
     Minimise la fonction quadratique a l'aide d'un gradient conjugue
     """
-    r = b-A.dot(x0)
+    A_height = np.shape(A)[0]
+    index_min_A = floor(rank_i*A_height/size_i)
+    index_max_A = floor((rank_i+1)*A_height/size_i)
+
+    b_height = np.shape(b)[0]
+    index_min_b = floor(rank_i*b_height/size_i)
+    index_max_b = floor((rank_i+1)*b_height/size_i)
+    #we have a lot of products
+    r = b-A[index_min_A:index_max_A].dot(x0[index_min_b:index_max_b])
     nrm_r0 = linalg.norm(r)
-    gc = A.transpose().dot(r)
-    x = np.copy(x0)
+    gc = A[index_min_A:index_max_A].transpose().dot(r)
+    x = np.copy(x0[index_min_b:index_max_b])
     p = np.copy(gc)
-    cp = A.dot(p)
+    cp = A[index_min_A:index_max_A].dot(p)
     nrm_gc = linalg.norm(gc)
     nrm_cp = linalg.norm(cp)
     alpha = nrm_gc*nrm_gc/(nrm_cp*nrm_cp)
@@ -275,6 +301,9 @@ def minimize( A : sparse.csr_matrix, b : np.array, x0 : np.array, niters : int, 
 
 
 if __name__ == '__main__':
+    #pour guarder les resultats
+    result_bcb=[]
+    result_bcr=[]
     # On va charger l'image afin de lire l'intensite de chaque pixel.
     # Puis on va creer un tableau contenant deux couches de cellules fantomes
     # pour pouvoir calculer facilement la moyenne puis la variance de chaque pixel
@@ -283,6 +312,10 @@ if __name__ == '__main__':
     im_gray = im_gray.convert('HSV')
     # On convertit l'image en tableau (ny x nx x 3) (Trois pour les trois composantes de la couleur)
     values_gray = np.array(im_gray)
+    #on partagera comme les index d autre code
+    image_height = np.shape(values_gray)[0]
+    index_min = floor(rank_i*image_height/size_i)
+    index_max = floor((rank_i+1)*image_height/size_i)
     # On créer le tableau d'intensite en rajoutant deux couches de cellules fantomes dans chaque direction :
     intensity = (1./255.)*create_field(values_gray, INTENSITY, nb_layers=2, prolong_field=True)
     print("for seq, we have\n",np.shape(intensity))
@@ -295,7 +328,7 @@ if __name__ == '__main__':
     print(f"Temps calcul moyenne : {end} secondes")
     print("Int size",np.shape(values_gray))
     print("means size",np.shape(means))
-    
+
     # Calcul de la variance de l'intensite pour chaque pixel avec ses huit voisins
     # La variance contient une couche de cellules fantomes comme la moyenne.
     deb = time.time()
@@ -316,21 +349,37 @@ if __name__ == '__main__':
     # Les composantes Cb (bleu) et Cr (Rouge) sont normalisees :
     Cb = (1./255.)*np.array(val_ycbcr[:,:,CB].flat, dtype=np.double)
     Cr = (1./255.)*np.array(val_ycbcr[:,:,CR].flat, dtype=np.double)
-
+    #on commence par le premier produit matrice vecteur, ici
     deb=time.time()
-    b_Cb = -A.dot(Cb)
-    b_Cr = -A.dot(Cr)
+    #paralellization do produit par lignes : on doit fait um gather apres
+    A_height = np.shape(A)[0]
+    index_min_A = floor(rank_i*A_height/size_i)
+    index_max_A = floor((rank_i+1)*A_height/size_i)
+    b_Cb = -A[index_min_A:index_max_A].dot(Cb)
+    b_Cr = -A[index_min_A:index_max_A].dot(Cr)
     end = time.time() - deb
+    comm.Barrier()
+    result_bcb=comm.allgather(b_Cb)
+    result_bcr=comm.allgather(b_Cr)    
+    b_Cb = np.hstack(result_bcb)
+    b_Cr = np.hstack(result_bcr) 
     print(f"Temps calcul des deux seconds membres : {end} secondes")
+    #division will be made inside
+    # print("A size",np.shape(A))
+    # print(" image height", image_height)
+    # print("indexes",[index_min,index_max])
     
     im_hsv = im.convert("HSV")
     val_hsv = np.array(im_hsv)
     deb = time.time()
-    fix_coul_indices = search_fixed_colored_pixels(val_hsv)
+    #since im_hsv height = im gray height, we use the normal idnex
+    fix_coul_indices = search_fixed_colored_pixels(val_hsv,index_min=index_min,index_max=index_max)
     end = time.time() - deb
     print(f"Temps recherche couleur fixee : {end} secondes")
     
-    # Application de la condition de Dirichlet sur la matrice :    
+
+    # Application de la condition de Dirichlet sur la matrice :
+      
     deb = time.time()
     apply_dirichlet(A, fix_coul_indices)
     end = time.time() - deb

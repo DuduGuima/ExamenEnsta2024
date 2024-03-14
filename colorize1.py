@@ -16,6 +16,7 @@ comm=MPI.COMM_WORLD
 rank_i = comm.Get_rank()
 size_i = comm.Get_size()
 
+
 gray_img = "example.bmp"
 marked_img = "example_marked.bmp"
 output = "example.png"
@@ -31,7 +32,7 @@ Y         = 0
 CB        = 1
 CR        = 2
 
-def create_field( values, ifield, nb_layers, prolong_field = False ):
+def create_field( values, ifield, nb_layers, index_min,index_max,prolong_field = False ):
     """
     A partir d'un tableau de taille ny x nx x nfields, on extrait
     le ifield eme champs qu'on stocke dans un nouveau tableau auquel on rajoute
@@ -40,14 +41,19 @@ def create_field( values, ifield, nb_layers, prolong_field = False ):
     les cellules fantomes sont initialisees en prolongeant les valeurs au bord
     de l'image.
     """
+    #divisao feita aqui é melhor
+
+
     assert(ifield >= 0)
     assert(ifield < values.shape[-1])
     # A partir d'un tableau contenant n champs de taille ny x nx, on 
-    field = np.zeros((values.shape[0]+2*nb_layers,values.shape[1]+2*nb_layers),dtype=np.double)
-    # On copie l'intensite dans les pixels non fantome. On normalise ces valeurs entre 0 et 1 :
-    field[nb_layers:-nb_layers,nb_layers:-nb_layers] = values[:,:,ifield]
+    #field = np.zeros((values.shape[0]+2*nb_layers,values.shape[1]+2*nb_layers),dtype=np.double)
 
-    
+    #we create a fragment of the old field for each processor
+    field = np.zeros(((index_max-index_min)+2*nb_layers,values.shape[1]+2*nb_layers),dtype=np.double)
+
+    # On copie l'intensite dans les pixels non fantome. On normalise ces valeurs entre 0 et 1 :
+    field[nb_layers:-nb_layers,nb_layers:-nb_layers] = values[index_min:index_max,:,ifield]
     # Par defaut, les valeurs qu'on prend en condition limite dans les ghosts cells sera zero
     # Si prolong_field est vrai, on prolonge les valeurs aux bords de l'image dans les conditions limites :
     if prolong_field:
@@ -213,14 +219,14 @@ def compute_matrix(image_size, i_start, intensity, means, variance):
     # On retourne la matrice sous forme d'une matrice creuse stockee en csr avec scipy
     return sparse.csr_matrix((coefs, ind_cols, beg_rows), dtype=np.double)
 
-def search_fixed_colored_pixels(mark_values):
+def search_fixed_colored_pixels(mark_values,index_min,index_max):
     """
     Recherche dans l'image marquee l'indice des pixels dont on a fixé la couleur:
     On utilise pour cela l'espace colorimetrique HSV qui separe bien l'intensite
     de la saturation et de la teinte pour chaque pixel :
     """
-    hue        = np.array(mark_values[:,:,HUE].flat, dtype=np.double)
-    saturation = np.array(mark_values[:,:,SATURATION].flat, dtype=np.double)
+    hue        = np.array(mark_values[index_min:index_max,:,HUE].flat, dtype=np.double)
+    saturation = np.array(mark_values[index_min:index_max,:,SATURATION].flat, dtype=np.double)
     return np.nonzero((hue != 0.) * (saturation != 0.))[0]
 
 def apply_dirichlet(A : sparse.csr_matrix, dirichlet : np.array):
@@ -275,6 +281,11 @@ def minimize( A : sparse.csr_matrix, b : np.array, x0 : np.array, niters : int, 
 
 
 if __name__ == '__main__':
+    results_imgarray=None
+    
+    #we'll need a single processor to save the results, ill choose 0
+    if rank_i==0:
+        results_imgarray=[]
     # On va charger l'image afin de lire l'intensite de chaque pixel.
     # Puis on va creer un tableau contenant deux couches de cellules fantomes
     # pour pouvoir calculer facilement la moyenne puis la variance de chaque pixel
@@ -283,18 +294,25 @@ if __name__ == '__main__':
     im_gray = im_gray.convert('HSV')
     # On convertit l'image en tableau (ny x nx x 3) (Trois pour les trois composantes de la couleur)
     values_gray = np.array(im_gray)
+    image_height = np.shape(values_gray)[0]
+    index_min = floor(rank_i*image_height/size_i)
+    index_max = floor((rank_i+1)*image_height/size_i)
+
+   
     # On créer le tableau d'intensite en rajoutant deux couches de cellules fantomes dans chaque direction :
-    intensity = (1./255.)*create_field(values_gray, INTENSITY, nb_layers=2, prolong_field=True)
-    print("for seq, we have\n",np.shape(intensity))
+    intensity = (1./255.)*create_field(values_gray, INTENSITY, nb_layers=2, index_min=index_min,index_max=index_max,prolong_field=True)
+    #print("For processeur {} field is /n".format(rank_i),np.shape(intensity))
     
+
     # Calcul de la moyenne de l'intensite pour chaque pixel avec ses huit voisins
     # La moyenne contient une couche de cellules fantomes (une de moins que l'intensite)
+    #nothing to do here, intensity is already divided
     deb = time.time()
     means = compute_means(intensity)
     end = time.time() - deb
+
     print(f"Temps calcul moyenne : {end} secondes")
-    print("Int size",np.shape(values_gray))
-    print("means size",np.shape(means))
+    #print("Means for process {} has shape".format(rank_i),np.shape(means))
     
     # Calcul de la variance de l'intensite pour chaque pixel avec ses huit voisins
     # La variance contient une couche de cellules fantomes comme la moyenne.
@@ -302,21 +320,27 @@ if __name__ == '__main__':
     variance = compute_variance(intensity, means)
     end = time.time() - deb
     print(f"Temps calcul variance : {end} secondes")
-    
+
+   
     # Calcul de la matrice utilisee pour minimiser la fonction quadratique
+    #A shape is dif in each processor....
     deb = time.time()
     A = compute_matrix((means.shape[1]-2,means.shape[0]-2), 0, intensity, means, variance)
     end = time.time() - deb
     print(f"Temps calcul matrice : {end} secondes")
-
+    #print("For process {} A has shape \n".format(rank_i),np.shape(A))
+    
     # Calcul des seconds membres
     im = Image.open(marked_img)
     im_ycbcr = im.convert('YCbCr')
     val_ycbcr = np.array(im_ycbcr)
     # Les composantes Cb (bleu) et Cr (Rouge) sont normalisees :
-    Cb = (1./255.)*np.array(val_ycbcr[:,:,CB].flat, dtype=np.double)
-    Cr = (1./255.)*np.array(val_ycbcr[:,:,CR].flat, dtype=np.double)
-
+    Cb = (1./255.)*np.array(val_ycbcr[index_min:index_max,:,CB].flat, dtype=np.double)
+    Cr = (1./255.)*np.array(val_ycbcr[index_min:index_max,:,CR].flat, dtype=np.double)
+    #print("For process {} Cr has shape \n".format(rank_i),np.shape(Cr))
+    
+    #we need to adapt Cb/Cr shape to match the one with A
+    #we did that above using index_min and max
     deb=time.time()
     b_Cb = -A.dot(Cb)
     b_Cr = -A.dot(Cr)
@@ -326,9 +350,10 @@ if __name__ == '__main__':
     im_hsv = im.convert("HSV")
     val_hsv = np.array(im_hsv)
     deb = time.time()
-    fix_coul_indices = search_fixed_colored_pixels(val_hsv)
+    fix_coul_indices = search_fixed_colored_pixels(val_hsv,index_min=index_min,index_max=index_max)
     end = time.time() - deb
     print(f"Temps recherche couleur fixee : {end} secondes")
+    #print("For process {} fix_coul has shape \n".format(rank_i),np.shape(fix_coul_indices))
     
     # Application de la condition de Dirichlet sur la matrice :    
     deb = time.time()
@@ -347,17 +372,39 @@ if __name__ == '__main__':
     x0 = np.zeros(Cr.shape,dtype=np.double)
     new_Cr = Cr + minimize(A, b_Cr, x0, niters,epsilon)
     print(f"\nTemps calcul min Cr : {time.time()-deb}")
-
+    comm.Barrier() #wait everyone to finish
     # On remet les valeurs des trois composantes de l'image couleur YCbCr entre 0 et 255 :
     new_Cb *= 255.
     new_Cr *= 255.
     intensity *= 255.
-    exit(0)
+    #we check the formats to see if we do a horiontal or vertical stack afterwards
+    # print("For processor {} int has shape: \n".format(rank_i),np.shape(intensity))
+    # print("For processor {} newcb has shape: \n".format(rank_i),np.shape(new_Cb))
+    # print("For processor {} newcr has shape: \n".format(rank_i),np.shape(new_Cr))
+    
+    
     # Puis on sauve l'image dans un fichier :
+    
+    
     shape = (means.shape[0]-2,means.shape[1]-2)
     new_image_array = np.empty((shape[0],shape[1],3), dtype=np.uint8)
     new_image_array[:,:,0] = intensity[2:-2,2:-2].astype('uint8')
     new_image_array[:,:,1] = np.reshape(new_Cb, shape).astype('uint8')
     new_image_array[:,:,2] = np.reshape(new_Cr, shape).astype('uint8')
-    new_im = Image.fromarray(new_image_array, mode='YCbCr')
-    new_im.convert('RGB').save(output, 'PNG')
+    print("For processus {} img array has size".format(rank_i),np.shape(new_image_array))
+    #now we gather these results in a final img array that will me saved by 0
+    results_imgarray=comm.gather(new_image_array,root=0)
+    if rank_i==0:
+        new_image_array = np.vstack(results_imgarray)
+        new_im = Image.fromarray(new_image_array, mode='YCbCr')
+        new_im.convert('RGB').save(output, 'PNG')
+
+#Porquoi ce methode n'est pas le meilleur?
+#bon, la minimization utilise les operations et expressions qui ne sont pas lineaires
+#Ainsi, j imagine que les resultats ne sont pas exatement la somme des resultats obtenus pour chaque processeur...
+#la separation des produits matriciels individuelles est mieux
+        
+#Aussi, quando on partage les arrays, comme on utilise les celules phantomes, quelques processeurs vont recevoir
+#et utiliser, pendant les calculs de minimization et mise a jour de Cb e Cr, des valeurs qui ne seront pas mis a jour
+#Ainsi, pour quelques pixels de l image originale, ils n'auront pas une evolution, ce qui peut nous donner
+#une image gris comme l initiale.
